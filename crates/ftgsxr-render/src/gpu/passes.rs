@@ -13,8 +13,8 @@ use ftgsxr_core::{Camera, DMat3, DVec3, Mat3, Vec3};
 use super::device::SplatDevice;
 use super::error::RenderError;
 use super::frame::{
-    Claim, FrameBuffers, RecordMode, SLOT_FREE, SLOT_PENDING, SLOT_READY, STATS_BYTES, TIMESTAMPS,
-    claim_slot,
+    Claim, FrameBuffers, PREPARE_TIMESTAMPS, RecordMode, SLOT_FREE, SLOT_PENDING, SLOT_READY,
+    STATS_BYTES, TIMESTAMPS, claim_slot,
 };
 use super::inputs::{
     ColorTransform, Colormap, ModelDraw, OcclusionInput, RenderMode, SortPose, ViewParams,
@@ -439,7 +439,10 @@ impl SplatPasses {
         self.sort.encode(enc, set, timestamp_writes);
         if set.queries.is_some() {
             // The draw's timestamps may already be marked (Q-114).
-            frame.ring.written.fetch_max(4, Ordering::AcqRel);
+            frame
+                .ring
+                .written
+                .fetch_or(PREPARE_TIMESTAMPS, Ordering::AcqRel);
         }
     }
 
@@ -557,19 +560,32 @@ impl SplatPasses {
 
     /// Stage 8: the statistics block to the staging buffer; `FrameStats::poll` reads it two frames later.
     ///
-    /// The frame's timestamps are resolved into the block first. Each frame takes the next
-    /// of four staging buffers, mapped when the encoder's submission completes; a buffer
-    /// still waiting for its mapping skips this frame's copy and keeps the frame it holds,
-    /// and one mapped but never returned is unmapped and reused (Q-81). Nothing waits (P-5).
+    /// The timestamps the frame wrote are resolved into the block first, the others zeroed
+    /// (Q-81). Each frame takes the next of four staging buffers, mapped when the encoder's
+    /// submission completes; a buffer still waiting for its mapping skips this frame's copy
+    /// and keeps the frame it holds, and one mapped but never returned is unmapped and
+    /// reused (Q-81). Nothing waits (P-5).
     pub fn encode_stats(&self, enc: &mut wgpu::CommandEncoder, frame: &FrameBuffers) {
         let set = &frame.set;
         let ring = &frame.ring;
-        let written = ring.written.swap(0, Ordering::AcqRel).min(TIMESTAMPS);
-        if let Some((queries, resolve)) = &set.queries
-            && written > 0
-        {
-            enc.resolve_query_set(queries, 0..written, resolve, 0);
-            enc.copy_buffer_to_buffer(resolve, 0, &set.stats, 16, u64::from(written) * 8);
+        let written = ring.written.swap(0, Ordering::AcqRel) & ((1 << TIMESTAMPS) - 1);
+        if let Some((queries, resolve)) = &set.queries {
+            // Q-81: a timestamp not written this frame is 0, not an earlier frame's, so a
+            // frame that skips stages 1–4 (Q-100) times its draw alone.
+            enc.clear_buffer(&set.stats, 16, Some(u64::from(TIMESTAMPS) * 8));
+            if written != 0 {
+                // The written indices are one run: stages 1–4's, the draw's, or both.
+                let (first, end) = (written.trailing_zeros(), 32 - written.leading_zeros());
+                debug_assert_eq!(written >> first, (1 << (end - first)) - 1, "one run");
+                enc.resolve_query_set(queries, first..end, resolve, 0);
+                enc.copy_buffer_to_buffer(
+                    resolve,
+                    0,
+                    &set.stats,
+                    16 + u64::from(first) * 8,
+                    u64::from(end - first) * 8,
+                );
+            }
         }
         let n = ring.encoded.fetch_add(1, Ordering::AcqRel);
         // Q-81
