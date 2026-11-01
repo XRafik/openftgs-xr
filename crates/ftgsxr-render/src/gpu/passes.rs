@@ -13,8 +13,8 @@ use ftgsxr_core::{Camera, DMat3, DVec3, Mat3, Vec3};
 use super::device::SplatDevice;
 use super::error::RenderError;
 use super::frame::{
-    Claim, FrameBuffers, PREPARE_TIMESTAMPS, RecordMode, SLOT_FREE, SLOT_PENDING, SLOT_READY,
-    STATS_BYTES, TIMESTAMPS, claim_slot,
+    ALL_TIMESTAMPS, Claim, FrameBuffers, PREPARE_TIMESTAMPS, RecordMode, SLOT_FREE, SLOT_PENDING,
+    SLOT_READY, STATS_BYTES, TIMESTAMPS, claim_slot,
 };
 use super::inputs::{
     ColorTransform, Colormap, ModelDraw, OcclusionInput, RenderMode, SortPose, ViewParams,
@@ -568,7 +568,7 @@ impl SplatPasses {
     pub fn encode_stats(&self, enc: &mut wgpu::CommandEncoder, frame: &FrameBuffers) {
         let set = &frame.set;
         let ring = &frame.ring;
-        let written = ring.written.swap(0, Ordering::AcqRel) & ((1 << TIMESTAMPS) - 1);
+        let written = ring.written.swap(0, Ordering::AcqRel) & ALL_TIMESTAMPS;
         if let Some((queries, resolve)) = &set.queries {
             // Q-81: a timestamp not written this frame is 0, not an earlier frame's, so a
             // frame that skips stages 1–4 (Q-100) times its draw alone.

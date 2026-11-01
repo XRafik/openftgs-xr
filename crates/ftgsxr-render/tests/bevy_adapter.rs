@@ -8,8 +8,8 @@
 //! plugin wiring (loads, uploads, extraction, the two render nodes, the camera's
 //! conversion to E6's camera); window and swapchain behaviour are M-4's I-n. The other
 //! tests here check `LinearOver`'s resolve onto an sRGB target (Q-94), that
-//! `FileEncoded` is not drawn onto one (Q-100, #178), and a still frame's GPU times
-//! (Q-81, Q-115, #184).
+//! `FileEncoded` is not drawn onto one (Q-100, #178), and the GPU times of a frame that
+//! skips stages 1–4 (Q-81, Q-115, #184).
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -150,7 +150,7 @@ fn composite(bytes: &[u8], w: u32, h: u32, background: [f32; 3]) -> RenderImage 
 fn render_p1(
     output: OutputSpace,
     format: TextureFormat,
-    still_frames: usize,
+    unchanged_frames: usize,
 ) -> (Vec<u8>, SplatStats, bool) {
     let (_, request) = probe("P1");
     let item = &request.items[0];
@@ -257,7 +257,7 @@ fn render_p1(
             *seen.readback.lock().unwrap() = None;
             app.update();
             app.update();
-            for _ in 0..still_frames {
+            for _ in 0..unchanged_frames {
                 app.update();
             }
             break;
@@ -413,12 +413,12 @@ fn gpu_bevy_adapter_does_not_draw_file_encoded_onto_an_srgb_target() {
 
 /// Frames rendered with nothing changed after the settle, so the statistics read are a
 /// skipped frame's on any GPU fewer than this many frames behind.
-const STILL_FRAMES: usize = 8;
+const UNCHANGED_FRAMES: usize = 8;
 
-/// A still view skips stages 1–4 (Q-100) and only draws: its statistics time the draw
-/// alone. The cull and sort wrote no timestamp that frame, so they are 0 (Q-81), and the
-/// total runs from the draw's first timestamp to its last (Q-115), on a device with
-/// timestamp queries.
+/// A view whose camera and instances are unchanged skips stages 1–4 (Q-100) and only
+/// draws: its statistics time the draw alone. The cull and sort wrote no timestamp that
+/// frame, so they are 0 (Q-81), and the total runs from the draw's first timestamp to its
+/// last (Q-115), on a device with timestamp queries.
 #[test]
 #[ignore = "gpu"]
 fn gpu_bevy_adapter_reports_only_the_draw_on_a_frame_that_skips_stages_1_to_4() {
@@ -426,11 +426,11 @@ fn gpu_bevy_adapter_reports_only_the_draw_on_a_frame_that_skips_stages_1_to_4() 
     let (_, stats, timestamps) = render_p1(
         OutputSpace::FileEncoded,
         TextureFormat::Rgba16Float,
-        STILL_FRAMES,
+        UNCHANGED_FRAMES,
     );
     assert_stats(stats);
     let t = stats.0.expect("statistics").gpu_times_ms;
-    eprintln!("a still frame's GPU times: {t:?}");
+    eprintln!("a skipped frame's GPU times: {t:?}");
     if !timestamps {
         eprintln!("no TIMESTAMP_QUERY: the GPU times are not checked");
         return;

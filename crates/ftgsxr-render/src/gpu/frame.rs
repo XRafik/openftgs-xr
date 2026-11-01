@@ -46,6 +46,8 @@ pub(crate) const TIMESTAMPS: u32 = 6;
 pub(crate) const PREPARE_TIMESTAMPS: u32 = 0b00_1111;
 /// The bits of `StatsRing::written` that the draw writes: indices 4 and 5.
 pub(crate) const DRAW_TIMESTAMPS: u32 = 0b11_0000;
+/// Every bit of `StatsRing::written`.
+pub(crate) const ALL_TIMESTAMPS: u32 = PREPARE_TIMESTAMPS | DRAW_TIMESTAMPS;
 
 /// How the records of a set are laid out (`cull.wgsl`'s `RECORD_MODE`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
