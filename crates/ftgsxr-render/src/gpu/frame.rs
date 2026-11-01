@@ -42,6 +42,12 @@ pub(crate) const STATS_DELAY: u64 = 2;
 /// The timestamps a frame writes (Q-81): the cull pass's begin and end, the sort's,
 /// the draw's.
 pub(crate) const TIMESTAMPS: u32 = 6;
+/// The bits of `StatsRing::written` that stages 1–4 write: the cull's and the sort's.
+pub(crate) const PREPARE_TIMESTAMPS: u32 = 0b00_1111;
+/// The bits of `StatsRing::written` that the draw writes: indices 4 and 5.
+pub(crate) const DRAW_TIMESTAMPS: u32 = 0b11_0000;
+/// Every bit of `StatsRing::written`.
+pub(crate) const ALL_TIMESTAMPS: u32 = PREPARE_TIMESTAMPS | DRAW_TIMESTAMPS;
 
 /// How the records of a set are laid out (`cull.wgsl`'s `RECORD_MODE`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -98,7 +104,8 @@ pub(crate) struct StatsRing {
     pub(crate) frame: [AtomicU64; STAGING_SLOTS],
     /// The frames encoded so far: the next frame's number.
     pub(crate) encoded: AtomicU64,
-    /// The timestamps written since the last `encode_stats`, a prefix of the query set.
+    /// The timestamps written since the last `encode_stats`, bit i for index i of the
+    /// query set: a frame that skips stages 1–4 writes the draw's alone (Q-100).
     pub(crate) written: AtomicU32,
 }
 
@@ -283,12 +290,14 @@ impl FrameBuffers {
 
     /// The splat draw pass's timestamp writes (§1.13, Q-81): indices 4 and 5 of the frame's
     /// query set, for the pass's owner to begin it with (Q-87); `None` when the device has
-    /// no timestamp queries. When `Some`, the frame's six timestamps are marked written, so
-    /// `encode_stats` resolves the draw's; it may be called before or after `encode_prepare`.
+    /// no timestamp queries. When `Some`, the draw's two timestamps are marked written, so
+    /// `encode_stats` resolves them; it may be called before or after `encode_prepare`.
     // Q-114
     pub fn draw_timestamp_writes(&self) -> Option<wgpu::RenderPassTimestampWrites<'_>> {
         let (queries, _) = self.set.queries.as_ref()?;
-        self.ring.written.fetch_max(TIMESTAMPS, Ordering::AcqRel);
+        self.ring
+            .written
+            .fetch_or(DRAW_TIMESTAMPS, Ordering::AcqRel);
         Some(wgpu::RenderPassTimestampWrites {
             query_set: queries,
             beginning_of_pass_write_index: Some(4),

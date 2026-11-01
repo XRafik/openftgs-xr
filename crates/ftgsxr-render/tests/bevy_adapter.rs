@@ -7,8 +7,9 @@
 //! (PSNR ≥ 45 dB, s ≤ 0.5 %, s_α ≤ 0.5 %) against the reference render. It catches a broken
 //! plugin wiring (loads, uploads, extraction, the two render nodes, the camera's
 //! conversion to E6's camera); window and swapchain behaviour are M-4's I-n. The other
-//! tests here check `LinearOver`'s resolve onto an sRGB target (Q-94) and that
-//! `FileEncoded` is not drawn onto one (Q-100, #178).
+//! tests here check `LinearOver`'s resolve onto an sRGB target (Q-94), that
+//! `FileEncoded` is not drawn onto one (Q-100, #178), and the GPU times of a frame that
+//! skips stages 1–4 (Q-81, Q-115, #184).
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -24,10 +25,12 @@ use bevy::ecs::prelude::*;
 use bevy::image::{Image, ImagePlugin};
 use bevy::math::{Mat3, Quat, Vec3};
 use bevy::mesh::MeshPlugin;
-use bevy::render::RenderPlugin;
 use bevy::render::error_handler::{RenderErrorHandler, RenderErrorPolicy};
 use bevy::render::gpu_readback::{Readback, ReadbackComplete};
 use bevy::render::render_resource::{TextureFormat, TextureUsages};
+use bevy::render::renderer::RenderDevice;
+use bevy::render::settings::WgpuFeatures;
+use bevy::render::{RenderApp, RenderPlugin};
 use bevy::transform::TransformPlugin;
 use bevy::transform::components::Transform;
 use bevy::window::{ExitCondition, WindowPlugin};
@@ -144,7 +147,11 @@ fn composite(bytes: &[u8], w: u32, h: u32, background: [f32; 3]) -> RenderImage 
 /// model loaded through `SplatLoad` at the item's timestamp, one `SplatCamera` writing
 /// `output` into an image target of `format`; returns the target's bytes as read back,
 /// a few frames after the upload, and the `SplatStats` then.
-fn render_p1(output: OutputSpace, format: TextureFormat) -> (Vec<u8>, SplatStats) {
+fn render_p1(
+    output: OutputSpace,
+    format: TextureFormat,
+    unchanged_frames: usize,
+) -> (Vec<u8>, SplatStats, bool) {
     let (_, request) = probe("P1");
     let item = &request.items[0];
     let (w, h) = (item.camera.width, item.camera.height);
@@ -250,6 +257,9 @@ fn render_p1(output: OutputSpace, format: TextureFormat) -> (Vec<u8>, SplatStats
             *seen.readback.lock().unwrap() = None;
             app.update();
             app.update();
+            for _ in 0..unchanged_frames {
+                app.update();
+            }
             break;
         }
     }
@@ -268,7 +278,13 @@ fn render_p1(output: OutputSpace, format: TextureFormat) -> (Vec<u8>, SplatStats
         .clone()
         .expect("a read back of the image target");
     let stats = *app.world().resource::<SplatStats>();
-    (data, stats)
+    let timestamps = app
+        .sub_app(RenderApp)
+        .world()
+        .resource::<RenderDevice>()
+        .features()
+        .contains(WgpuFeatures::TIMESTAMP_QUERY);
+    (data, stats, timestamps)
 }
 
 /// The first item's reference render of P1.
@@ -295,7 +311,7 @@ fn gpu_bevy_adapter_renders_p1_like_the_headless_renderer() {
     let _layer = layer_messages(); // R-16, Q-105
     // The image target is 16-bit float RGBA, so the view's main texture is the layer's
     // format and `FileEncoded` holds the layer unrounded.
-    let (data, stats) = render_p1(OutputSpace::FileEncoded, TextureFormat::Rgba16Float);
+    let (data, stats, _) = render_p1(OutputSpace::FileEncoded, TextureFormat::Rgba16Float, 0);
     let (reference, background) = p1_reference();
     let ours = composite(&data, reference.width, reference.height, background);
     let m = metrics(&reference, &ours);
@@ -322,11 +338,12 @@ fn gpu_bevy_adapter_renders_p1_like_the_headless_renderer() {
 fn gpu_bevy_adapter_resolves_p1_over_a_background_onto_an_srgb_target() {
     let _layer = layer_messages(); // R-16, Q-105
     let background = [0.2, 0.4, 0.6];
-    let (data, stats) = render_p1(
+    let (data, stats, _) = render_p1(
         OutputSpace::LinearOver {
             background: Some(background),
         },
         TextureFormat::Rgba8UnormSrgb,
+        0,
     );
     let (reference, request_background) = p1_reference();
     assert_eq!(request_background, [0.0; 3], "P1's reference is over black");
@@ -373,7 +390,7 @@ fn gpu_bevy_adapter_resolves_p1_over_a_background_onto_an_srgb_target() {
 #[ignore = "gpu"]
 fn gpu_bevy_adapter_does_not_draw_file_encoded_onto_an_srgb_target() {
     let _layer = layer_messages(); // R-16, Q-105
-    let (data, stats) = render_p1(OutputSpace::FileEncoded, TextureFormat::Rgba8UnormSrgb);
+    let (data, stats, _) = render_p1(OutputSpace::FileEncoded, TextureFormat::Rgba8UnormSrgb, 0);
     // The view was refused, so it drew nothing and counted nothing.
     assert!(
         stats.0.is_none(),
@@ -392,4 +409,33 @@ fn gpu_bevy_adapter_does_not_draw_file_encoded_onto_an_srgb_target() {
             "row {y} holds only the clear value (0, 0, 0, 0)"
         );
     }
+}
+
+/// Frames rendered with nothing changed after the settle, so the statistics read are a
+/// skipped frame's on any GPU fewer than this many frames behind.
+const UNCHANGED_FRAMES: usize = 8;
+
+/// A view whose camera and instances are unchanged skips stages 1–4 (Q-100) and only
+/// draws: its statistics time the draw alone. The cull and sort wrote no timestamp that
+/// frame, so they are 0 (Q-81), and the total runs from the draw's first timestamp to its
+/// last (Q-115), on a device with timestamp queries.
+#[test]
+#[ignore = "gpu"]
+fn gpu_bevy_adapter_reports_only_the_draw_on_a_frame_that_skips_stages_1_to_4() {
+    let _layer = layer_messages(); // R-16, Q-105
+    let (_, stats, timestamps) = render_p1(
+        OutputSpace::FileEncoded,
+        TextureFormat::Rgba16Float,
+        UNCHANGED_FRAMES,
+    );
+    assert_stats(stats);
+    let t = stats.0.expect("statistics").gpu_times_ms;
+    eprintln!("a skipped frame's GPU times: {t:?}");
+    if !timestamps {
+        eprintln!("no TIMESTAMP_QUERY: the GPU times are not checked");
+        return;
+    }
+    assert_eq!((t.cull, t.sort), (0.0, 0.0), "no stage 1–4 times: {t:?}");
+    assert!(t.draw > 0.0, "the draw is timed: {t:?}");
+    assert_eq!(t.total, t.draw, "the total is the draw's alone: {t:?}");
 }

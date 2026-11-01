@@ -497,6 +497,10 @@ fn draw_node(
     let Some(state) = views.states.get(&view.entity()) else {
         return;
     };
+    if matches!(state.camera.output, OutputSpace::LinearOver { .. }) && state.layer.is_none() {
+        // No pass, so no draw's timestamps marked for a later `encode_stats` (Q-81).
+        return;
+    }
     let (camera, target, depth) = view.into_inner();
     let frame = &state.frame;
     // The draw's timestamps (Q-81, Q-87, Q-114): this node owns the pass.
@@ -559,7 +563,7 @@ fn draw_node(
                 .passes
                 .encode_resolve(pass.wgpu_pass(), layer, background);
         }
-        (OutputSpace::LinearOver { .. }, None) => return,
+        (OutputSpace::LinearOver { .. }, None) => unreachable!("returned above"),
     }
     state.passes.encode_stats(ctx.command_encoder(), frame);
 }

@@ -67,7 +67,7 @@ impl FrameStats {
 
 /// The statistics block (`cull.wgsl`'s `size`, Q-81): the two counts, the overflow
 /// flag and C in words 0–3, then six 64-bit timestamps (the cull's begin and end, the
-/// sort's, the draw's) in ticks of `period_ns`.
+/// sort's, the draw's) in ticks of `period_ns`, 0 where the frame wrote none.
 pub(crate) fn decode_stats(bytes: &[u8; STATS_BYTES as usize], period_ns: f32) -> FrameStats {
     let word = |i: usize| u32::from_le_bytes(bytes[4 * i..4 * i + 4].try_into().expect("4 bytes"));
     let ts: [u64; 6] = std::array::from_fn(|i| {
@@ -77,7 +77,10 @@ pub(crate) fn decode_stats(bytes: &[u8; STATS_BYTES as usize], period_ns: f32) -
     let span = |a: u64, b: u64| {
         if a != 0 && b >= a { ms(b - a) } else { 0.0 }
     };
-    let last = ts.iter().copied().filter(|&t| t != 0).max().unwrap_or(0);
+    // Q-115: from the first timestamp written to the last, whichever passes ran.
+    let written = || ts.iter().copied().filter(|&t| t != 0);
+    let first = written().min().unwrap_or(0);
+    let last = written().max().unwrap_or(0);
     FrameStats {
         visible_splats: word(0),
         visible_centers: word(1),
@@ -87,7 +90,7 @@ pub(crate) fn decode_stats(bytes: &[u8; STATS_BYTES as usize], period_ns: f32) -
             cull: span(ts[0], ts[1]),
             sort: span(ts[2], ts[3]),
             draw: span(ts[4], ts[5]),
-            total: span(ts[0], last),
+            total: span(first, last),
         },
     }
 }
@@ -142,5 +145,19 @@ mod tests {
             ],
             [0.002, 0.001, 0.004, 0.01]
         );
+    }
+
+    #[test]
+    fn decode_stats_with_only_the_draw_written_times_the_draw_alone() {
+        // A frame that skipped stages 1–4 (Q-100): the cull and sort wrote nothing, so
+        // they are 0 (Q-81), and the total runs from the draw's begin to its end (Q-115).
+        let s = decode_stats(
+            &block([5, 0, 0, 10], [0, 0, 0, 0, 7_000_000, 10_000_000]),
+            1.0,
+        );
+        assert_eq!(s.gpu_times_ms.cull, 0.0);
+        assert_eq!(s.gpu_times_ms.sort, 0.0);
+        assert_eq!(s.gpu_times_ms.draw, 3.0);
+        assert_eq!(s.gpu_times_ms.total, 3.0);
     }
 }
